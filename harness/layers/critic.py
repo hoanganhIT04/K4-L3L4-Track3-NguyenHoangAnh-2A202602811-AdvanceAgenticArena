@@ -79,16 +79,57 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        if not isinstance(report, dict):
+            return report
+
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims:
+            return report
+
+        observed = ctx.observed_text
+        new_claims = []
+
+        read_docs = (
+            [d for d in ctx.corpus.docs if d.body in observed]
+            if ctx.corpus and hasattr(ctx.corpus, "docs")
+            else []
+        )
+
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text")
+            doc_id = claim.get("doc_id", "")
+            if not isinstance(text, str) or not text:
+                continue
+
+            if text in observed:
+                new_claims.append({"text": text, "doc_id": doc_id})
+            elif " và " in text:
+                parts = text.split(" và ", 1)
+                p0, p1 = parts[0].strip(), parts[1].strip()
+                if p0 and p1 and p0 in observed and p1 in observed:
+                    d0 = next((d.doc_id for d in read_docs if p0 in d.body), None)
+                    d1 = next((d.doc_id for d in read_docs if p1 in d.body), None)
+                    if d0 and d1 and d0 != d1:
+                        new_claims.append({"text": p0, "doc_id": d0})
+                        new_claims.append({"text": p1, "doc_id": d1})
+                        report["abstain"] = True
+
+        if not new_claims:
+            report["abstain"] = True
+            report["claims"] = []
+            report["citations"] = []
+            report["answer"] = "Theo tài liệu nội bộ: Không đủ căn cứ để trả lời câu hỏi."
+        else:
+            report["claims"] = new_claims
+            report["citations"] = sorted(
+                set(
+                    c["doc_id"]
+                    for c in new_claims
+                    if isinstance(c.get("doc_id"), str) and c["doc_id"]
+                )
+            )
+
+        return report
+
